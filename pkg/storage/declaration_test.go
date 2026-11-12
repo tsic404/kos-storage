@@ -15,10 +15,19 @@ import (
 	"github.com/tsic404/kosd/pkg/write"
 )
 
-// TestDeclarationLoads requires the storage page to pass the framework's own
-// declaration checks, so the page is declarable without a cluster.
+// TestDeclarationLoads requires the packaged storage page to pass the
+// framework's own declaration checks, so the page is installable without a
+// cluster.
 func TestDeclarationLoads(t *testing.T) {
-	loaded, err := Declaration().Load()
+	pkg, _, err := Package()
+	if err != nil {
+		t.Fatalf("pack the extension: %v", err)
+	}
+	declaration, err := InstallDeclaration(pkg)
+	if err != nil {
+		t.Fatalf("build the install declaration: %v", err)
+	}
+	loaded, err := declaration.Load()
 	if err != nil {
 		t.Fatalf("load the declaration: %v", err)
 	}

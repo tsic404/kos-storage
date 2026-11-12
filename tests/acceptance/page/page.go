@@ -7,6 +7,10 @@ import (
 	"net/http"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/tsic404/kos-sdk/packaging"
+
 	"github.com/tsic404/kosd/pkg/extension"
 	"github.com/tsic404/kosd/pkg/pages"
 	"github.com/tsic404/kosd/tests/acceptance/harness"
@@ -14,18 +18,61 @@ import (
 	"github.com/tsic404/kos-storage/pkg/storage"
 )
 
-// Start wires the storage readings into a fresh shell and installs the storage
-// package, so the page is served exactly as an installation serves it.
+// ComponentName is the system component object that installs this product.
+const ComponentName = "storage"
+
+// Reference locates the artifact the component installs; the kernel never
+// interprets it (KOSD-C-17).
+const Reference = "test://kos-storage/1.0.0"
+
+// Start wires the storage readings into a fresh shell and installs the packaged
+// storage extension, so the page is served exactly as an installation serves it.
 func Start(t *testing.T, cluster *harness.Cluster) (*harness.Shell, *storage.Readings) {
+	t.Helper()
+	shell, readings := StartShell(t, cluster)
+	shell.Use(Install(t, cluster, shell.Retention()))
+	return shell, readings
+}
+
+// StartShell wires the storage readings into a fresh shell without installing
+// the product, so a case can judge the state before its component exists.
+func StartShell(t *testing.T, cluster *harness.Cluster) (*harness.Shell, *storage.Readings) {
 	t.Helper()
 	readings := &storage.Readings{Dynamic: cluster.Dynamic}
 	shell := cluster.StartShell(t, func(config *pages.Config) {
 		config.Readings = pages.Router{storage.Identifier: readings}
 	})
 	readings.Now = shell.Accounts.Clock.Now
-	installation := cluster.InstallPackageWith(t, "storage", storage.Declaration(), extension.MemoryArtifacts{}, shell.Retention())
-	shell.Use(installation)
 	return shell, readings
+}
+
+// Artifact packs the product, verifies the package the way an install path does,
+// and returns the artifact a system component names: its reference, the sha256
+// of the install document, and the document itself.
+func Artifact(t *testing.T) (reference, digest string, content []byte) {
+	t.Helper()
+	pkg, archive, err := storage.Package()
+	if err != nil {
+		t.Fatalf("pack the storage extension: %v", err)
+	}
+	if _, err := packaging.Verify(archive, pkg.Digest); err != nil {
+		t.Fatalf("verify the storage package: %v", err)
+	}
+	content, err = storage.InstallArtifact(pkg)
+	if err != nil {
+		t.Fatalf("build the install artifact: %v", err)
+	}
+	return Reference, extension.DigestOf(content), content
+}
+
+// Install creates the system component for the packaged artifact and runs one
+// install pass.
+func Install(t *testing.T, cluster *harness.Cluster, retention extension.PreferenceRetention) *extension.Installation {
+	t.Helper()
+	reference, digest, content := Artifact(t)
+	artifacts := extension.MemoryArtifacts{reference: content}
+	cluster.Create(t, &unstructured.Unstructured{Object: harness.Component(ComponentName, reference, digest)})
+	return cluster.ExtensionStateWith(t, artifacts, retention)
 }
 
 // Read reads one page through the control-plane API.

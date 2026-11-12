@@ -6,7 +6,13 @@
 package storage
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
+
+	"github.com/tsic404/kos-sdk/manifest"
+	"github.com/tsic404/kos-sdk/packaging"
 
 	"github.com/tsic404/kosd/pkg/extension"
 )
@@ -53,16 +59,139 @@ const (
 	ReasonBackups            = "备份状态与最近演练由备份策略调和写入；手动备份、恢复与演练入口归 kos-backup"
 )
 
-// Declaration returns the contribution kos-storage ships (KOSD-C-18): the
-// storage page and its deletion and migration entries.
-func Declaration() extension.Declaration {
-	return extension.Declaration{
-		Identifier: Identifier,
-		Version:    Version,
-		Contributions: extension.Contributions{
-			Pages: []extension.Page{storagePage()},
-		},
+// InstallArtifact returns the artifact a system component names for one
+// verified package: the declaration document of KOSD-C-17, derived from the
+// package manifest. The kernel's install path reads a declaration document as
+// the artifact, so the package manifest is translated, not unpacked.
+func InstallArtifact(pkg packaging.Package) ([]byte, error) {
+	declaration, err := InstallDeclaration(pkg)
+	if err != nil {
+		return nil, err
 	}
+	return extension.Marshal(declaration)
+}
+
+// InstallDeclaration is the kernel install form of one verified package. Every
+// value comes from the package manifest, so the installed contributions are the
+// declared ones. A manifest carrying a contribution class the kernel form has
+// no field for is refused instead of being narrowed silently (KOSD-C-18).
+//
+// The manifest's read scopes and roles stay where the kernel judges roles: the
+// page carries its own required role, and a kernel permission entry only ever
+// widens an extension object's writers (KOSD-C-59), of which this product
+// declares none.
+func InstallDeclaration(pkg packaging.Package) (extension.Declaration, error) {
+	declaration := pkg.Manifest
+	if err := checkCarried(declaration); err != nil {
+		return extension.Declaration{}, err
+	}
+	if framework := declaration.Dependencies.Framework; framework != "" && framework != declaration.FrameworkVersion {
+		return extension.Declaration{}, fmt.Errorf(
+			"framework dependency %q disagrees with the target range %q",
+			framework, declaration.FrameworkVersion,
+		)
+	}
+	pages, err := kernelPages(declaration.Contributions.Pages)
+	if err != nil {
+		return extension.Declaration{}, err
+	}
+	retention, err := kernelRetention(declaration.UninstallRetention)
+	if err != nil {
+		return extension.Declaration{}, err
+	}
+	return extension.Declaration{
+		Identifier:       declaration.ID,
+		Version:          declaration.Version,
+		FrameworkVersion: declaration.FrameworkVersion,
+		Contributions:    extension.Contributions{Pages: pages},
+		Dependencies:     kernelDependencies(declaration.Dependencies),
+		Configuration:    extension.Configuration{Schema: declaration.Config},
+		Retention:        retention,
+	}, nil
+}
+
+// checkCarried refuses a manifest whose contribution classes the kernel install
+// form cannot carry. Only the page class has an install form here; a class that
+// appears without one would otherwise install as nothing.
+func checkCarried(declaration manifest.ExtensionManifest) error {
+	contributions := declaration.Contributions
+	classes := []struct {
+		name     string
+		declared bool
+	}{
+		{name: "objectClasses", declared: len(contributions.ObjectClasses) > 0},
+		{name: "controllers", declared: len(contributions.Controllers) > 0},
+		{name: "capabilities", declared: len(contributions.Capabilities) > 0},
+		{name: "settings", declared: len(contributions.Settings) > 0},
+		{name: "catalogSources", declared: len(contributions.CatalogSources) > 0},
+		{name: "discoveryAdapters", declared: len(contributions.DiscoveryAdapters) > 0},
+		{name: "diagnosticAdapters", declared: len(contributions.DiagnosticAdapters) > 0},
+		{name: "userPreferences", declared: len(contributions.UserPreferences) > 0},
+		{name: "apps", declared: len(contributions.Apps) > 0},
+	}
+	for _, class := range classes {
+		if class.declared {
+			return fmt.Errorf("contribution class %q has no kernel install form in %s", class.name, Identifier)
+		}
+	}
+	return nil
+}
+
+// kernelPages reads the declared page contributions into the kernel's page
+// shape (KOSD-C-53). The manifest carries the same page the kernel loads, so a
+// failed decode is a declaration mistake, not a runtime condition.
+func kernelPages(declared []map[string]any) ([]extension.Page, error) {
+	encoded, err := json.Marshal(declared)
+	if err != nil {
+		return nil, fmt.Errorf("encode the declared pages: %w", err)
+	}
+	var pages []extension.Page
+	if err := json.Unmarshal(encoded, &pages); err != nil {
+		return nil, fmt.Errorf("decode the declared pages: %w", err)
+	}
+	return pages, nil
+}
+
+// kernelDependencies maps the manifest's capability and component edges. The
+// framework edge is the declaration's target range, which the kernel reads from
+// the top-level field.
+func kernelDependencies(dependencies manifest.Dependencies) extension.Dependencies {
+	kernel := extension.Dependencies{}
+	for _, capability := range dependencies.Capabilities {
+		kernel.Capabilities = append(kernel.Capabilities, extension.CapabilityRequirement{
+			Name:     capability.Name,
+			Versions: capability.Version,
+		})
+	}
+	for _, component := range dependencies.Components {
+		kernel.Components = append(kernel.Components, extension.ComponentRequirement{
+			Identifier: component.ID,
+			Versions:   component.Version,
+		})
+	}
+	return kernel
+}
+
+// kernelRetention maps the declared fate of each contribution's data (KOSD-C-29).
+// An external resource reference has no kernel form: the kernel's entry names
+// the resource it covers, and an external reference is never deleted by KOS.
+func kernelRetention(retention manifest.UninstallRetention) ([]extension.Retention, error) {
+	if len(retention.ExternalResources) > 0 {
+		return nil, fmt.Errorf("external resource references have no kernel install form in %s", Identifier)
+	}
+	classes := make([]string, 0, len(retention.Contributions))
+	for class := range retention.Contributions {
+		classes = append(classes, class)
+	}
+	sort.Strings(classes)
+	entries := make([]extension.Retention, 0, len(classes))
+	for _, class := range classes {
+		entries = append(entries, extension.Retention{
+			Resource: class,
+			Keep:     retention.Contributions[class] == manifest.Retain,
+		})
+	}
+	return entries, nil
 }
 
 // storagePage declares the storage items STORAGE-C-1 and STORAGE-C-82 name.
