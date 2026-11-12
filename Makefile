@@ -16,7 +16,7 @@ ENVTEST_STAMP := $(ENVTEST_ASSETS)/.version
 # the post-unpack check read this same list, so a partial unpack stays unusable.
 ENVTEST_BINARIES := kube-apiserver etcd
 
-.PHONY: all build verify fmt-check vet lint test acceptance envtest-version envtest-assets clean
+.PHONY: all build verify fmt-check vet lint test acceptance package envtest-version envtest-assets clean
 
 all: verify test
 
@@ -42,6 +42,11 @@ test: envtest-assets
 
 acceptance: envtest-assets
 	KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS)" $(GO) test ./tests/... -count=1 -v
+
+# package builds the extension artifact through the SDK's packing path; the
+# command prints the package digest and, with -install-doc, the install digest.
+package:
+	$(GO) run ./cmd/kos-storage-package -out dist
 
 # envtest-version is the only place the pinned control-plane version is written
 # down: CI reads it for the cache key, so the two cannot drift apart.
@@ -80,4 +85,4 @@ envtest-assets:
 	printf '%s\n' "$(ENVTEST_K8S_VERSION)" > "$(ENVTEST_STAMP)"
 
 clean:
-	rm -rf bin
+	rm -rf bin dist
